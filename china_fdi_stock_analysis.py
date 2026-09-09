@@ -19,17 +19,9 @@ Usage
 -----
     python china_fdi_stock_analysis.py "China-Global-Investment-Tracker-public.xlsx"
 
-Optional:
-    python china_fdi_stock_analysis.py workbook.xlsx --output-dir cgti_fdi_output --top-n 10
-
 Outputs
 -------
-- Cleaned annual investment flows (used only as inputs to the cumulative stock)
-- Annual cumulative stock proxy by country
-- Annual cumulative stock proxy by sector
-- Country and sector shares of cumulative stock
-- Summary tables for latest year
-- PNG visualizations
+- Updated workbook with annual cumulative stock-proxy tables and charts
 """
 
 from __future__ import annotations
@@ -42,7 +34,7 @@ import numpy as np
 import openpyxl
 import pandas as pd
 from openpyxl.styles import Alignment, Font, PatternFill
-from openpyxl.chart import AreaChart, LineChart, Reference
+from openpyxl.chart import AreaChart, BarChart, LineChart, Reference
 from openpyxl.drawing.line import LineProperties
 
 
@@ -320,6 +312,580 @@ def add_formula_analysis_sheet(workbook: Path) -> None:
     wb.save(workbook)
 
 
+def add_canada_analysis_sheet(workbook: Path) -> None:
+    """Add annual Canadian flows, cumulative stock proxy, and sector shares."""
+    wb = openpyxl.load_workbook(workbook)
+    source = wb[SHEET_NAME]
+    analysis_name = "Canada FDI Analysis"
+    if analysis_name in wb.sheetnames:
+        del wb[analysis_name]
+    ws = wb.create_sheet(analysis_name)
+
+    data_start = HEADER_ROW + 2
+    data_end = source.max_row
+    canada_rows = [
+        row for row in range(data_start, data_end + 1)
+        if str(source.cell(row, 10).value).strip() == "Canada"
+    ]
+    years = sorted({
+        source.cell(row, 2).value for row in canada_rows
+        if isinstance(source.cell(row, 2).value, (int, float))
+    })
+    sectors = sorted({
+        source.cell(row, 8).value for row in canada_rows
+        if source.cell(row, 8).value not in (None, "")
+    })
+    if not years or not sectors:
+        raise ValueError("No Canadian observations with year and sector were found.")
+
+    ws["A1"] = "China FDI in Canada: annual sector analysis from Dataset 1"
+    ws["A1"].font = Font(bold=True, size=14)
+    ws["A2"] = (
+        "Annual flow is the sum of recorded transaction values. Stock is a gross "
+        "cumulative recorded-investment proxy, not an official FDI position measure."
+    )
+    ws["A2"].alignment = Alignment(wrap_text=True)
+    ws.merge_cells(start_row=2, start_column=1, end_row=2, end_column=len(sectors) + 2)
+
+    flow_header = 4
+    flow_first = flow_header + 1
+    stock_header = flow_first + len(years) + 2
+    stock_first = stock_header + 1
+    total_col = len(sectors) + 2
+
+    ws.cell(flow_header, 1, "Annual flow (USD millions)").font = Font(bold=True)
+    ws.cell(stock_header, 1, "Cumulative stock proxy (USD millions)").font = Font(bold=True)
+    for col, sector in enumerate(sectors, start=2):
+        ws.cell(flow_header, col, sector)
+        ws.cell(stock_header, col, sector)
+    ws.cell(flow_header, total_col, "Total")
+    ws.cell(stock_header, total_col, "Total")
+
+    for offset, year in enumerate(years):
+        flow_row = flow_first + offset
+        stock_row = stock_first + offset
+        ws.cell(flow_row, 1, year)
+        ws.cell(stock_row, 1, year)
+        for col in range(2, total_col):
+            sector_ref = f"{openpyxl.utils.get_column_letter(col)}${flow_header}"
+            ws.cell(
+                flow_row, col,
+                f'=SUMIFS(\'{SHEET_NAME}\'!$E${data_start}:$E${data_end},'
+                f'\'{SHEET_NAME}\'!$B${data_start}:$B${data_end},$A{flow_row},'
+                f'\'{SHEET_NAME}\'!$H${data_start}:$H${data_end},{sector_ref},'
+                f'\'{SHEET_NAME}\'!$J${data_start}:$J${data_end},"Canada")',
+            )
+            ws.cell(
+                stock_row, col,
+                f"=SUM({openpyxl.utils.get_column_letter(col)}${flow_first}:"
+                f"{openpyxl.utils.get_column_letter(col)}{flow_row})",
+            )
+        ws.cell(flow_row, total_col, f"=SUM(B{flow_row}:{openpyxl.utils.get_column_letter(total_col - 1)}{flow_row})")
+        ws.cell(stock_row, total_col, f"=SUM(B{stock_row}:{openpyxl.utils.get_column_letter(total_col - 1)}{stock_row})")
+
+    summary_header = stock_first + len(years) + 2
+    ws.cell(summary_header, 1, "Latest-year sector summary").font = Font(bold=True, size=12)
+    for col, heading in enumerate(
+        ["Sector", "Stock proxy (USD millions)", "Share of total stock (%)", "Share change since first year (pp)"],
+        start=1,
+    ):
+        ws.cell(summary_header + 1, col, heading)
+    first_stock_row = stock_first
+    latest_stock_row = stock_first + len(years) - 1
+    for offset, sector in enumerate(sectors, start=summary_header + 2):
+        sector_col = next(col for col in range(2, total_col) if ws.cell(stock_header, col).value == sector)
+        col_letter = openpyxl.utils.get_column_letter(sector_col)
+        ws.cell(offset, 1, sector)
+        ws.cell(offset, 2, f"={col_letter}{latest_stock_row}")
+        ws.cell(offset, 3, f"={col_letter}{latest_stock_row}/$" +
+                f"{openpyxl.utils.get_column_letter(total_col)}${latest_stock_row}*100")
+        ws.cell(offset, 4, f"=C{offset}-{col_letter}{first_stock_row}/$" +
+                f"{openpyxl.utils.get_column_letter(total_col)}${first_stock_row}*100")
+
+    header_fill = PatternFill("solid", fgColor="D9EAF7")
+    for row in (flow_header, stock_header, summary_header + 1):
+        for cell in ws[row]:
+            cell.fill = header_fill
+    for row in range(flow_first, stock_first + len(years)):
+        for col in range(2, total_col + 1):
+            ws.cell(row, col).number_format = "#,##0.0"
+    for row in range(summary_header + 2, summary_header + 2 + len(sectors)):
+        ws.cell(row, 2).number_format = "#,##0.0"
+        ws.cell(row, 3).number_format = "0.0"
+        ws.cell(row, 4).number_format = "0.0"
+
+    chart = LineChart()
+    chart.title = "China's cumulative recorded investment in Canada by sector"
+    chart.y_axis.title = "USD millions"
+    chart.x_axis.title = "Year"
+    chart.add_data(
+        Reference(ws, min_col=2, max_col=total_col - 1, min_row=stock_header, max_row=latest_stock_row),
+        titles_from_data=True,
+    )
+    chart.set_categories(Reference(ws, min_col=1, min_row=stock_first, max_row=latest_stock_row))
+    chart.height = 9
+    chart.width = 16
+    ws.add_chart(chart, f"F{summary_header}")
+
+    ws.freeze_panes = "B5"
+    ws.column_dimensions["A"].width = 38
+    for col in range(2, total_col + 1):
+        ws.column_dimensions[openpyxl.utils.get_column_letter(col)].width = 18
+    wb.calculation.fullCalcOnLoad = True
+    wb.calculation.forceFullCalc = True
+    wb.save(workbook)
+
+
+def add_energy_subsector_analysis_sheet(workbook: Path) -> None:
+    """Add annual energy-subsector flows and stock proxies globally and in Canada."""
+    wb = openpyxl.load_workbook(workbook)
+    source = wb[SHEET_NAME]
+    analysis_name = "Energy Subsector Analysis"
+    if analysis_name in wb.sheetnames:
+        del wb[analysis_name]
+    ws = wb.create_sheet(analysis_name)
+
+    data_start = HEADER_ROW + 2
+    data_end = source.max_row
+    years = sorted({
+        source.cell(row, 2).value
+        for row in range(data_start, data_end + 1)
+        if isinstance(source.cell(row, 2).value, (int, float))
+    })
+    raw_subsectors = {
+        source.cell(row, 9).value
+        for row in range(data_start, data_end + 1)
+        if source.cell(row, 8).value == "Energy"
+    }
+    subsectors = sorted(
+        "Unspecified" if value in (None, "") else str(value).strip()
+        for value in raw_subsectors
+    )
+    if not years or not subsectors:
+        raise ValueError("No energy subsector observations were found.")
+
+    ws["A1"] = "China energy investment: annual subsector analysis"
+    ws["A1"].font = Font(bold=True, size=14)
+    ws["A2"] = (
+        "Annual flow is the sum of recorded transaction values. Stock is a gross "
+        "cumulative recorded-investment proxy, not an official FDI position measure."
+    )
+    ws["A2"].alignment = Alignment(wrap_text=True)
+    ws.merge_cells(start_row=2, start_column=1, end_row=2, end_column=len(subsectors) + 2)
+
+    def write_panel(start_row: int, title: str, country_criteria: str | None) -> dict[str, int]:
+        flow_header = start_row + 1
+        flow_first = flow_header + 1
+        stock_header = flow_first + len(years) + 2
+        stock_first = stock_header + 1
+        total_col = len(subsectors) + 2
+        ws.cell(start_row, 1, title).font = Font(bold=True, size=12)
+        ws.cell(flow_header, 1, "Annual flow (USD millions)").font = Font(bold=True)
+        ws.cell(stock_header, 1, "Cumulative stock proxy (USD millions)").font = Font(bold=True)
+        for col, subsector in enumerate(subsectors, start=2):
+            ws.cell(flow_header, col, subsector)
+            ws.cell(stock_header, col, subsector)
+        ws.cell(flow_header, total_col, "Total")
+        ws.cell(stock_header, total_col, "Total")
+
+        for offset, year in enumerate(years):
+            flow_row = flow_first + offset
+            stock_row = stock_first + offset
+            ws.cell(flow_row, 1, year)
+            ws.cell(stock_row, 1, year)
+            for col in range(2, total_col):
+                subsector_ref = f"{openpyxl.utils.get_column_letter(col)}${flow_header}"
+                criteria = f'""' if ws.cell(flow_header, col).value == "Unspecified" else subsector_ref
+                country_clause = ""
+                if country_criteria is not None:
+                    country_clause = (
+                        f',\'{SHEET_NAME}\'!$J${data_start}:$J${data_end},"{country_criteria}"'
+                    )
+                ws.cell(
+                    flow_row, col,
+                    f'=SUMIFS(\'{SHEET_NAME}\'!$E${data_start}:$E${data_end},'
+                    f'\'{SHEET_NAME}\'!$B${data_start}:$B${data_end},$A{flow_row},'
+                    f'\'{SHEET_NAME}\'!$H${data_start}:$H${data_end},"Energy",'
+                    f'\'{SHEET_NAME}\'!$I${data_start}:$I${data_end},{criteria}'
+                    f'{country_clause})',
+                )
+                col_letter = openpyxl.utils.get_column_letter(col)
+                ws.cell(
+                    stock_row, col,
+                    f"=SUM({col_letter}${flow_first}:{col_letter}{flow_row})",
+                )
+            ws.cell(
+                flow_row, total_col,
+                f"=SUM(B{flow_row}:{openpyxl.utils.get_column_letter(total_col - 1)}{flow_row})",
+            )
+            ws.cell(
+                stock_row, total_col,
+                f"=SUM(B{stock_row}:{openpyxl.utils.get_column_letter(total_col - 1)}{stock_row})",
+            )
+        return {
+            "flow_header": flow_header,
+            "flow_first": flow_first,
+            "stock_header": stock_header,
+            "stock_first": stock_first,
+            "latest_stock": stock_first + len(years) - 1,
+            "total_col": total_col,
+        }
+
+    global_panel = write_panel(4, "All countries", None)
+    canada_start = global_panel["latest_stock"] + 4
+    canada_panel = write_panel(canada_start, "Canada only", "Canada")
+
+    header_fill = PatternFill("solid", fgColor="D9EAF7")
+    for panel in (global_panel, canada_panel):
+        for row in (panel["flow_header"], panel["stock_header"]):
+            for cell in ws[row]:
+                cell.fill = header_fill
+        for row in range(panel["flow_first"], panel["latest_stock"] + 1):
+            for col in range(2, panel["total_col"] + 1):
+                ws.cell(row, col).number_format = "#,##0.0"
+
+    def add_stock_chart(panel: dict[str, int], anchor: str, title: str) -> None:
+        chart = LineChart()
+        chart.title = title
+        chart.y_axis.title = "Cumulative recorded investment (USD millions)"
+        chart.x_axis.title = "Year"
+        chart.x_axis.numFmt = "0"
+        chart.x_axis.tickLblPos = "low"
+        chart.x_axis.majorTickMark = "out"
+        chart.x_axis.delete = False
+        chart.add_data(
+            Reference(
+                ws,
+                min_col=2,
+                max_col=panel["total_col"] - 1,
+                min_row=panel["stock_header"],
+                max_row=panel["latest_stock"],
+            ),
+            titles_from_data=True,
+        )
+        chart.set_categories(
+            Reference(ws, min_col=1, min_row=panel["stock_first"], max_row=panel["latest_stock"])
+        )
+        chart.height = 9
+        chart.width = 16
+        ws.add_chart(chart, anchor)
+
+    add_stock_chart(
+        global_panel, f"J{global_panel['flow_header']}",
+        "Cumulative energy investment by subsector: all countries",
+    )
+    add_stock_chart(
+        canada_panel, f"J{canada_panel['flow_header']}",
+        "Cumulative energy investment by subsector: Canada",
+    )
+
+    ws.freeze_panes = "B6"
+    ws.column_dimensions["A"].width = 38
+    for col in range(2, len(subsectors) + 3):
+        ws.column_dimensions[openpyxl.utils.get_column_letter(col)].width = 18
+    wb.calculation.fullCalcOnLoad = True
+    wb.calculation.forceFullCalc = True
+    wb.save(workbook)
+
+
+def add_deal_concentration_analysis_sheet(
+    workbook: Path, df: pd.DataFrame
+) -> None:
+    """Add annual deal-size and concentration metrics for Canada and globally."""
+    wb = openpyxl.load_workbook(workbook)
+    helper_name = "Deal Concentration Calc"
+    if helper_name in wb.sheetnames:
+        del wb[helper_name]
+    helper = wb.create_sheet(helper_name)
+    analysis_name = "Deal Size & Concentration"
+    if analysis_name in wb.sheetnames:
+        del wb[analysis_name]
+    ws = wb.create_sheet(analysis_name)
+
+    data_start = HEADER_ROW + 2
+    source_end = HEADER_ROW + 1 + len(df)
+    years = list(range(int(df["Year"].min()), int(df["Year"].max()) + 1))
+    helper["A1"] = "Year"
+    helper["B1"] = "Country"
+    helper["C1"] = "Value (USD mn)"
+    for row in range(2, len(df) + 2):
+        source_row = data_start + row - 2
+        helper.cell(row, 1, f"='{SHEET_NAME}'!B{source_row}")
+        helper.cell(row, 2, f"='{SHEET_NAME}'!J{source_row}")
+        helper.cell(row, 3, f"='{SHEET_NAME}'!E{source_row}")
+
+    helper_columns: dict[tuple[str, int], str] = {}
+    for index, year in enumerate(years, start=4):
+        global_col = openpyxl.utils.get_column_letter(index)
+        canada_col = openpyxl.utils.get_column_letter(index + len(years))
+        helper.cell(1, index, f"All countries {year}")
+        helper.cell(1, index + len(years), f"Canada {year}")
+        for row in range(2, len(df) + 2):
+            helper.cell(row, index, f'=IF($A{row}={year},$C{row},"")')
+            helper.cell(row, index + len(years), f'=IF(AND($A{row}={year},$B{row}="Canada"),$C{row},"")')
+        helper_columns[("All countries", year)] = global_col
+        helper_columns[("Canada", year)] = canada_col
+    helper.sheet_state = "hidden"
+
+    metric_names = [
+        "Total recorded investment (USD mn)",
+        "Transactions",
+        "Mean deal size (USD mn)",
+        "Median deal size (USD mn)",
+        "Largest deal (USD mn)",
+        "90th percentile share (%)",
+        "Excluding largest deal (USD mn)",
+    ]
+
+    ws["A1"] = "Deal size and concentration of China's recorded investment"
+    ws["A1"].font = Font(bold=True, size=14)
+    ws["A2"] = (
+        "Canada is compared with all countries. Concentration measures describe recorded "
+        "transactions, not official FDI positions. The 90th-percentile share is the "
+        "share of annual investment from transactions at or above that year's 90th-percentile deal size."
+    )
+    ws["A2"].alignment = Alignment(wrap_text=True)
+    ws.merge_cells(start_row=2, start_column=1, end_row=2, end_column=12)
+
+    header_row = 4
+    ws.cell(header_row, 1, "Year").font = Font(bold=True)
+    columns = [
+        ("Canada", name) for name in metric_names
+    ] + [("All countries", name) for name in metric_names]
+    for col, (group, name) in enumerate(columns, start=2):
+        ws.cell(header_row, col, f"{group}: {name}")
+
+    for row_offset, year in enumerate(years, start=1):
+        row = header_row + row_offset
+        ws.cell(row, 1, year)
+        for col, (group, name) in enumerate(columns, start=2):
+            helper_col = helper_columns[(group, year)]
+            helper_range = f"'{helper_name}'!${helper_col}$2:${helper_col}${len(df) + 1}"
+            total = f"SUM({helper_range})"
+            formulas = {
+                "Total recorded investment (USD mn)": f'=IFERROR({total},0)',
+                "Transactions": f'=COUNT({helper_range})',
+                "Mean deal size (USD mn)": f'=IFERROR(AVERAGE({helper_range}),0)',
+                "Median deal size (USD mn)": f'=IFERROR(MEDIAN({helper_range}),0)',
+                "Largest deal (USD mn)": f'=IFERROR(MAX({helper_range}),0)',
+                "90th percentile share (%)": (
+                    f'=IFERROR(SUMIF({helper_range},">="&PERCENTILE({helper_range},0.90),'
+                    f'{helper_range})/{total}*100,0)'
+                ),
+                "Excluding largest deal (USD mn)": f'=IFERROR({total}-MAX({helper_range}),0)',
+            }
+            ws.cell(row, col, formulas[name])
+
+    header_fill = PatternFill("solid", fgColor="D9EAF7")
+    for cell in ws[header_row]:
+        cell.fill = header_fill
+    for row in range(header_row + 1, header_row + len(years) + 1):
+        for col in range(2, 16):
+            ws.cell(row, col).number_format = "#,##0.0"
+    for col in range(2, 16):
+        if "share" in str(ws.cell(header_row, col).value).lower():
+            for row in range(header_row + 1, header_row + len(years) + 1):
+                ws.cell(row, col).number_format = "0.0"
+
+    def add_chart(
+        anchor: str,
+        title: str,
+        selected_columns: list[int],
+        y_title: str,
+        min_row: int = header_row,
+    ) -> None:
+        chart = LineChart()
+        chart.title = title
+        chart.y_axis.title = y_title
+        chart.x_axis.title = "Year"
+        chart.x_axis.numFmt = "0"
+        chart.x_axis.tickLblPos = "low"
+        chart.x_axis.majorTickMark = "out"
+        chart.x_axis.delete = False
+        for col in selected_columns:
+            chart.add_data(
+                Reference(
+                    ws,
+                    min_col=col,
+                    max_col=col,
+                    min_row=min_row,
+                    max_row=header_row + len(years),
+                ),
+                titles_from_data=True,
+            )
+        chart.set_categories(
+            Reference(ws, min_col=1, min_row=header_row + 1, max_row=header_row + len(years))
+        )
+        chart.height = 8
+        chart.width = 15
+        chart.legend.position = "r"
+        ws.add_chart(chart, anchor)
+
+    def add_activity_chart(anchor: str) -> None:
+        bars = BarChart()
+        bars.type = "col"
+        bars.title = "Canada: total investment and transaction count"
+        bars.y_axis.title = "Total investment (USD millions)"
+        bars.x_axis.title = "Year"
+        bars.x_axis.numFmt = "0"
+        bars.x_axis.tickLblPos = "low"
+        bars.x_axis.majorTickMark = "out"
+        bars.x_axis.delete = False
+        bars.add_data(
+            Reference(ws, min_col=2, max_col=2, min_row=header_row, max_row=header_row + len(years)),
+            titles_from_data=True,
+        )
+        bars.set_categories(
+            Reference(ws, min_col=1, min_row=header_row + 1, max_row=header_row + len(years))
+        )
+        bars.height = 8
+        bars.width = 15
+
+        transactions = LineChart()
+        transactions.y_axis.axId = 200
+        transactions.y_axis.title = "Transactions"
+        transactions.y_axis.crosses = "max"
+        transactions.add_data(
+            Reference(ws, min_col=3, max_col=3, min_row=header_row, max_row=header_row + len(years)),
+            titles_from_data=True,
+        )
+        transactions.set_categories(
+            Reference(ws, min_col=1, min_row=header_row + 1, max_row=header_row + len(years))
+        )
+        bars += transactions
+        ws.add_chart(bars, anchor)
+
+    # Canada columns: total=2, transactions=3, mean=4, median=5, p90 share=7.
+    add_activity_chart("W4")
+    add_chart(
+        "W20",
+        "Canada: mean versus median deal size",
+        [4, 5],
+        "USD millions",
+    )
+    add_chart(
+        "W52",
+        "90th-percentile deal concentration: Canada versus all countries",
+        [7, 14],
+        "Share of annual investment (%)",
+    )
+
+    ws.freeze_panes = "B5"
+    ws.column_dimensions["A"].width = 12
+    for col in range(2, 16):
+        ws.column_dimensions[openpyxl.utils.get_column_letter(col)].width = 19
+    for col in range(1, 3 + len(years) * 2):
+        helper.column_dimensions[openpyxl.utils.get_column_letter(col)].width = 15
+    wb.calculation.calcMode = "auto"
+    wb.calculation.fullCalcOnLoad = True
+    wb.calculation.forceFullCalc = True
+    wb.save(workbook)
+
+
+def add_deal_concentration_analysis_sheet(
+    workbook: Path, df: pd.DataFrame
+) -> None:
+    """Rebuild the average-versus-median transaction comparison tab."""
+    wb = openpyxl.load_workbook(workbook)
+    helper_name = "Deal Concentration Calc"
+    if helper_name in wb.sheetnames:
+        del wb[helper_name]
+    sheet_name = "Deal Size & Concentration"
+    if sheet_name in wb.sheetnames:
+        del wb[sheet_name]
+    ws = wb.create_sheet(sheet_name)
+
+    data_start = HEADER_ROW + 2
+    source_end = HEADER_ROW + 1 + len(df)
+    years = list(range(int(df["Year"].min()), int(df["Year"].max()) + 1))
+
+    ws["A1"] = "Average and median transaction size over time"
+    ws["A1"].font = Font(bold=True, size=14)
+    ws["A2"] = "Transaction values are in USD millions. Rest of world excludes Canada."
+    ws["A2"].alignment = Alignment(wrap_text=True)
+    ws.merge_cells(start_row=2, start_column=1, end_row=2, end_column=15)
+
+    metrics = ["Mean transaction size (USD mn)", "Median transaction size (USD mn)"]
+    ws.cell(4, 1, "Year")
+    groups = ["Canada", "Rest of world"]
+    for col, (group, metric) in enumerate(
+        [(g, m) for g in groups for m in metrics], start=2
+    ):
+        ws.cell(4, col, f"{group}: {metric}")
+    for row_offset, year in enumerate(years, start=1):
+        row = 4 + row_offset
+        ws.cell(row, 1, year)
+        for col, (group, metric) in enumerate(
+            [(g, m) for g in groups for m in metrics], start=2
+        ):
+            year_range = f"'{SHEET_NAME}'!$B${data_start}:$B${source_end}"
+            value_range = f"'{SHEET_NAME}'!$E${data_start}:$E${source_end}"
+            country_range = f"'{SHEET_NAME}'!$J${data_start}:$J${source_end}"
+            country_condition = (
+                f',{country_range},"Canada"' if group == "Canada"
+                else f',{country_range},"<>"&"Canada"'
+            )
+            criteria = f"{year_range},$A{row}{country_condition}"
+            formulas = {
+                "Mean transaction size (USD mn)": (
+                    f'=IF(COUNTIFS({year_range},$A{row},{country_range},'
+                    f'{"\"Canada\"" if group == "Canada" else "\"<>\"&\"Canada\""})=0,"",'
+                    f'AVERAGEIFS({value_range},{criteria}))'
+                ),
+                "Median transaction size (USD mn)": (
+                    f'=IFERROR(MEDIAN(_xlfn.FILTER({value_range},'
+                    f'({year_range}=$A{row})*'
+                    f'({country_range}{"=" if group == "Canada" else "<>"}"Canada"))),"")'
+                ),
+            }
+            ws.cell(row, col, formulas[metric])
+
+    fill = PatternFill("solid", fgColor="D9EAF7")
+    for cell in ws[4]:
+        cell.fill = fill
+    for row in range(5, 5 + len(years)):
+        for col in range(2, 6):
+            ws.cell(row, col).number_format = "0.0"
+    for col in (2, 3, 4, 5):
+        for row in range(5, 5 + len(years)):
+            ws.cell(row, col).number_format = "0.0"
+
+    def line_chart(anchor, title, columns, y_title):
+        chart = LineChart()
+        chart.title = title
+        chart.y_axis.title = y_title
+        chart.x_axis.title = "Year"
+        chart.x_axis.numFmt = "0"
+        chart.x_axis.delete = False
+        for col in columns:
+            chart.add_data(
+                Reference(ws, min_col=col, max_col=col, min_row=4, max_row=4 + len(years)),
+                titles_from_data=True,
+            )
+        chart.set_categories(
+            Reference(ws, min_col=1, min_row=5, max_row=4 + len(years))
+        )
+        chart.height = 8
+        chart.width = 15
+        ws.add_chart(chart, anchor)
+
+    line_chart("Q4", "Canada: mean versus median transaction size", [2, 3], "USD millions")
+    line_chart(
+        "Q20",
+        "Rest of world: mean versus median transaction size",
+        [4, 5],
+        "USD millions",
+    )
+    ws.freeze_panes = "B5"
+    ws.column_dimensions["A"].width = 12
+    for col in range(2, 6):
+        ws.column_dimensions[openpyxl.utils.get_column_letter(col)].width = 19
+    wb.calculation.calcMode = "auto"
+    wb.calculation.fullCalcOnLoad = True
+    wb.calculation.forceFullCalc = True
+    wb.save(workbook)
+
+
 def load_and_clean(workbook: Path) -> pd.DataFrame:
     """Load Dataset 1 and retain valid annual investment observations."""
     df = pd.read_excel(workbook, sheet_name=SHEET_NAME, header=HEADER_ROW)
@@ -488,91 +1054,36 @@ def main() -> None:
         default=default_workbook,
         help=f"Path to the CGIT .xlsx workbook (default: {default_workbook.name})",
     )
-    parser.add_argument("--output-dir", type=Path, default=Path("china_fdi_stock_output"))
-    parser.add_argument("--top-n", type=int, default=10,
-                        help="Number of leading countries/sectors to show in charts (default: 10)")
     args = parser.parse_args()
 
     if not args.workbook.exists():
         raise FileNotFoundError(args.workbook)
-    args.output_dir.mkdir(parents=True, exist_ok=True)
     add_formula_analysis_sheet(args.workbook)
+    add_canada_analysis_sheet(args.workbook)
+    add_energy_subsector_analysis_sheet(args.workbook)
 
     df = load_and_clean(args.workbook)
-    country_flows, country_stock, country_shares = annual_panel(df, "Country")
-    sector_flows, sector_stock, sector_shares = annual_panel(df, "Sector")
+    canada_df = df[df["Country"].eq("Canada")].copy()
+    if canada_df.empty:
+        raise ValueError("No Canadian observations were found in Dataset 1.")
+    add_deal_concentration_analysis_sheet(args.workbook, df)
+
+    _, country_stock, country_shares = annual_panel(df, "Country")
+    _, sector_stock, sector_shares = annual_panel(df, "Sector")
+    _, canada_sector_stock, canada_sector_shares = annual_panel(
+        canada_df, "Sector"
+    )
 
     country_summary = latest_summary(country_stock, country_shares)
     sector_summary = latest_summary(sector_stock, sector_shares)
 
-    country_change = save_change_table(country_shares, country_stock)
-    sector_change = save_change_table(sector_shares, sector_stock)
-
-    # Save analysis tables.
-    df.to_csv(args.output_dir / "cleaned_dataset1_transactions.csv", index=False)
-    country_flows.to_csv(args.output_dir / "annual_flows_by_country_usd_millions.csv")
-    country_stock.to_csv(args.output_dir / "cumulative_stock_proxy_by_country_usd_millions.csv")
-    country_shares.to_csv(args.output_dir / "cumulative_stock_share_by_country_percent.csv")
-    country_summary.to_csv(args.output_dir / "latest_country_stock_summary.csv")
-    country_change.to_csv(args.output_dir / "country_stock_share_change.csv")
-
-    sector_flows.to_csv(args.output_dir / "annual_flows_by_sector_usd_millions.csv")
-    sector_stock.to_csv(args.output_dir / "cumulative_stock_proxy_by_sector_usd_millions.csv")
-    sector_shares.to_csv(args.output_dir / "cumulative_stock_share_by_sector_percent.csv")
-    sector_summary.to_csv(args.output_dir / "latest_sector_stock_summary.csv")
-    sector_change.to_csv(args.output_dir / "sector_stock_share_change.csv")
-
-    total_stock = save_total_stock_chart(
-        df, args.output_dir / "01_total_cumulative_stock_proxy.png"
-    )
-    total_stock.to_csv(args.output_dir / "annual_total_flow_and_stock_proxy.csv")
-
-    top_countries = top_categories(country_stock, args.top_n)
-    top_sectors = top_categories(sector_stock, min(args.top_n, sector_stock.shape[1]))
-
-    save_line_chart(
-        country_stock,
-        top_countries,
-        "China's cumulative recorded investment by destination country",
-        "Cumulative recorded investment (USD billions)",
-        args.output_dir / "02_stock_by_top_countries.png",
-    )
-    save_stacked_share_chart(
-        country_shares,
-        top_countries,
-        "Changing country composition of China's cumulative recorded investment",
-        args.output_dir / "03_country_stock_shares_over_time.png",
-    )
-    save_latest_bar(
-        country_summary,
-        args.top_n,
-        f"Largest destination countries by cumulative recorded investment, {country_stock.index.max()}",
-        args.output_dir / "04_latest_country_stock_ranking.png",
-    )
-
-    save_line_chart(
-        sector_stock,
-        top_sectors,
-        "China's cumulative recorded overseas investment by sector",
-        "Cumulative recorded investment (USD billions)",
-        args.output_dir / "05_stock_by_sector.png",
-    )
-    save_stacked_share_chart(
-        sector_shares,
-        top_sectors,
-        "Changing sector composition of China's cumulative recorded investment",
-        args.output_dir / "06_sector_stock_shares_over_time.png",
-    )
-    save_latest_bar(
-        sector_summary,
-        min(args.top_n, len(sector_summary)),
-        f"Largest sectors by cumulative recorded investment, {sector_stock.index.max()}",
-        args.output_dir / "07_latest_sector_stock_ranking.png",
-    )
-
     latest_year = int(df["Year"].max())
     first_year = int(df["Year"].min())
-    latest_total_bn = total_stock.loc[latest_year, "Cumulative stock proxy (USD millions)"] / 1000
+    latest_total_bn = country_stock.loc[latest_year].sum() / 1000
+    canada_latest_year = int(canada_sector_stock.index.max())
+    canada_latest_total_bn = (
+        canada_sector_stock.loc[canada_latest_year].sum() / 1000
+    )
 
     print("\nCGIT annual cumulative investment analysis complete")
     print("---------------------------------------------------")
@@ -581,7 +1092,13 @@ def main() -> None:
     print(f"Latest cumulative stock proxy: USD {latest_total_bn:,.1f} billion")
     print(f"Top country in {latest_year}: {country_summary.index[0]}")
     print(f"Top sector in {latest_year}: {sector_summary.index[0]}")
-    print(f"Outputs saved to: {args.output_dir.resolve()}")
+    print(
+        f"Canada: {int(canada_df['Year'].min())}–{canada_latest_year}, "
+        f"{len(canada_df):,} transactions, latest stock proxy "
+        f"USD {canada_latest_total_bn:,.1f} billion"
+    )
+    print(f"Top Canadian sector in {canada_latest_year}: {canada_sector_stock.loc[canada_latest_year].idxmax()}")
+    print(f"Updated workbook: {args.workbook.resolve()}")
     print("\nNOTE: This is a gross cumulative investment stock proxy, not an official FDI position stock.")
 
 
